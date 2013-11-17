@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -65,6 +66,9 @@ func jobInitApi(job *engine.Job) string {
 	job.Eng.Hack_SetGlobalVar("httpapi.runtime", srv.runtime)
 	job.Eng.Hack_SetGlobalVar("httpapi.bridgeIP", srv.runtime.networkManager.bridgeNetwork.IP)
 	if err := job.Eng.Register("create", srv.ContainerCreate); err != nil {
+		return err.Error()
+	}
+	if err := job.Eng.Register("stop", srv.ContainerStop); err != nil {
 		return err.Error()
 	}
 	if err := job.Eng.Register("start", srv.ContainerStart); err != nil {
@@ -1430,16 +1434,30 @@ func (srv *Server) ContainerStart(job *engine.Job) string {
 	return "0"
 }
 
-func (srv *Server) ContainerStop(name string, t int) error {
+func (srv *Server) ContainerStop(job *engine.Job) string {
+	if len(job.Args) < 1 {
+		return fmt.Sprintf("Not enough arguments. Usage: %s CONTAINER TIMEOUT", job.Name)
+	}
+	name := job.Args[0]
+	var t uint64
+	if len(job.Args) == 2 {
+		var err error
+		t, err = strconv.ParseUint(job.Args[1], 10, 32)
+		if err != nil {
+			return fmt.Sprintf("Invalid delay format: %s. Please provide an integer number of seconds.", job.Args[1])
+		}
+	} else {
+		t = 10
+	}
 	if container := srv.runtime.Get(name); container != nil {
-		if err := container.Stop(t); err != nil {
-			return fmt.Errorf("Cannot stop container %s: %s", name, err)
+		if err := container.Stop(int(t)); err != nil {
+			return fmt.Sprintf("Cannot stop container %s: %s", name, err)
 		}
 		srv.LogEvent("stop", container.ID, srv.runtime.repositories.ImageName(container.Image))
 	} else {
-		return fmt.Errorf("No such container: %s", name)
+		return fmt.Sprintf("No such container: %s", name)
 	}
-	return nil
+	return "0"
 }
 
 func (srv *Server) ContainerWait(name string) (int, error) {
