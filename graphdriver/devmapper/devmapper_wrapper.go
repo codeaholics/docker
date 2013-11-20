@@ -149,26 +149,28 @@ type (
 )
 
 var (
-	DmTaskDestory       = dmTaskDestroyFct
-	DmTaskCreate        = dmTaskCreateFct
-	DmTaskRun           = dmTaskRunFct
-	DmTaskSetName       = dmTaskSetNameFct
-	DmTaskSetMessage    = dmTaskSetMessageFct
-	DmTaskSetSector     = dmTaskSetSectorFct
-	DmTaskSetCookie     = dmTaskSetCookieFct
-	DmTaskSetAddNode    = dmTaskSetAddNodeFct
-	DmTaskSetRo         = dmTaskSetRoFct
-	DmTaskAddTarget     = dmTaskAddTargetFct
-	DmTaskGetInfo       = dmTaskGetInfoFct
-	DmGetNextTarget     = dmGetNextTargetFct
-	DmGetBlockSize      = dmGetBlockSizeFct
-	DmAttachLoopDevice  = dmAttachLoopDeviceFct
-	DmUdevWait          = dmUdevWaitFct
-	DmLogInitVerbose    = dmLogInitVerboseFct
-	DmSetDevDir         = dmSetDevDirFct
-	DmGetLibraryVersion = dmGetLibraryVersionFct
-	LogWithErrnoInit    = logWithErrnoInitFct
-	GetBlockSize        = getBlockSizeFct
+	DmTaskDestory            = dmTaskDestroyFct
+	DmTaskCreate             = dmTaskCreateFct
+	DmTaskRun                = dmTaskRunFct
+	DmTaskSetName            = dmTaskSetNameFct
+	DmTaskSetMessage         = dmTaskSetMessageFct
+	DmTaskSetSector          = dmTaskSetSectorFct
+	DmTaskSetCookie          = dmTaskSetCookieFct
+	DmTaskSetAddNode         = dmTaskSetAddNodeFct
+	DmTaskSetRo              = dmTaskSetRoFct
+	DmTaskAddTarget          = dmTaskAddTargetFct
+	DmTaskGetInfo            = dmTaskGetInfoFct
+	DmGetNextTarget          = dmGetNextTargetFct
+	DmGetBlockSize           = dmGetBlockSizeFct
+	DmAttachLoopDevice       = dmAttachLoopDeviceFct
+	DmUdevWait               = dmUdevWaitFct
+	DmLogInitVerbose         = dmLogInitVerboseFct
+	DmSetDevDir              = dmSetDevDirFct
+	DmGetLibraryVersion      = dmGetLibraryVersionFct
+	LogWithErrnoInit         = logWithErrnoInitFct
+	GetBlockSize             = getBlockSizeFct
+	DmGetLoopbackBackingFile = dmGetLoopbackBackingFileFct
+	DmLoopbackSetCapacity    = dmLoopbackSetCapacityFct
 )
 
 func free(p *C.char) {
@@ -239,14 +241,14 @@ func dmTaskAddTargetFct(task *CDmTask,
 		C.uint64_t(start), C.uint64_t(size), Cttype, Cparams))
 }
 
-func dmGetLoopbackBackingFile(fd uintptr) (uint64, uint64, syscall.Errno) {
+func dmGetLoopbackBackingFileFct(fd uintptr) (uint64, uint64, syscall.Errno) {
 	var lo64 C.struct_loop_info64
 	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, fd, C.LOOP_GET_STATUS64,
 		uintptr(unsafe.Pointer(&lo64)))
 	return uint64(lo64.lo_device), uint64(lo64.lo_inode), err
 }
 
-func dmLoopbackSetCapacity(fd uintptr) syscall.Errno {
+func dmLoopbackSetCapacityFct(fd uintptr) syscall.Errno {
 	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, fd, C.LOOP_SET_CAPACITY, 0)
 	return err
 }

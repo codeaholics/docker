@@ -337,8 +337,7 @@ func (devices *DeviceSet) setupBaseImage() error {
 }
 
 func setCloseOnExec(name string) {
-	fileInfos, _ := ioutil.ReadDir("/proc/self/fd")
-	if fileInfos != nil {
+	if fileInfos, _ := ioutil.ReadDir("/proc/self/fd"); fileInfos != nil {
 		for _, i := range fileInfos {
 			link, _ := os.Readlink(filepath.Join("/proc/self/fd", i.Name()))
 			if link == name {

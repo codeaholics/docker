@@ -8,8 +8,6 @@ import (
 	"path"
 )
 
-var DefaultDriver string
-
 type InitFunc func(root string) (Driver, error)
 
 type Driver interface {
@@ -34,6 +32,7 @@ type Differ interface {
 }
 
 var (
+	DefaultDriver string
 	// All registred drivers
 	drivers map[string]InitFunc
 	// Slice of drivers that should be used in an order
@@ -64,14 +63,8 @@ func GetDriver(name, home string) (Driver, error) {
 	return nil, fmt.Errorf("No such driver: %s", name)
 }
 
-func New(root string) (Driver, error) {
-	var driver Driver
-	var lastError error
-
-	for _, name := range []string{
-		os.Getenv("DOCKER_DRIVER"),
-		DefaultDriver,
-	} {
+func New(root string) (driver Driver, err error) {
+	for _, name := range []string{os.Getenv("DOCKER_DRIVER"), DefaultDriver} {
 		if name != "" {
 			return GetDriver(name, root)
 		}
