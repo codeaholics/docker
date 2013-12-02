@@ -1578,6 +1578,15 @@ func (cli *DockerCli) CmdAttach(args ...string) error {
 	if err := cli.hijack("POST", "/containers/"+cmd.Arg(0)+"/attach?"+v.Encode(), container.Config.Tty, in, cli.out, cli.err, nil); err != nil {
 		return err
 	}
+
+	_, status, err := getExitCode(cli, cmd.Arg(0))
+	if err != nil {
+		return err
+	}
+	if status != 0 {
+		return &utils.StatusError{Status: status}
+	}
+
 	return nil
 }
 
@@ -2392,8 +2401,27 @@ func (cli *DockerCli) hijack(method, path string, setRawTerminal bool, in io.Rea
 
 	var receiveStdout chan error
 
+	var oldState *term.State
+
+	if in != nil && setRawTerminal && cli.isTerminal && os.Getenv("NORAW") == "" {
+		oldState, err = term.SetRawTerminal(cli.terminalFd)
+		if err != nil {
+			return err
+		}
+		defer term.RestoreTerminal(cli.terminalFd, oldState)
+	}
+
 	if stdout != nil {
 		receiveStdout = utils.Go(func() (err error) {
+			defer func() {
+				if in != nil {
+					if setRawTerminal && cli.isTerminal {
+						term.RestoreTerminal(cli.terminalFd, oldState)
+					}
+					in.Close()
+				}
+			}()
+
 			// When TTY is ON, use regular copy
 			if setRawTerminal {
 				_, err = io.Copy(stdout, br)
@@ -2403,14 +2431,6 @@ func (cli *DockerCli) hijack(method, path string, setRawTerminal bool, in io.Rea
 			utils.Debugf("[hijack] End of stdout")
 			return err
 		})
-	}
-
-	if in != nil && setRawTerminal && cli.isTerminal && os.Getenv("NORAW") == "" {
-		oldState, err := term.SetRawTerminal(cli.terminalFd)
-		if err != nil {
-			return err
-		}
-		defer term.RestoreTerminal(cli.terminalFd, oldState)
 	}
 
 	sendStdin := utils.Go(func() error {
