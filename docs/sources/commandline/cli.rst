@@ -558,7 +558,8 @@ Displaying image hierarchy
 
     Usage: docker import URL|- [REPOSITORY[:TAG]]
 
-    Create a new filesystem image from the contents of a tarball
+    Create an empty filesystem image and import the contents of the tarball 
+    (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz) into it, then optionally tag it.
 
 At this time, the URL must start with ``http`` and point to a single
 file archive (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz) containing a
@@ -657,6 +658,54 @@ Insert file from github
     Usage: docker inspect [OPTIONS] CONTAINER
 
     Return low-level information on a container
+
+      -format="": template to output results
+
+By default, this will render all results in a JSON array.  If a format
+is specified, the given template will be executed for each result.
+
+Go's `text/template <http://golang.org/pkg/text/template/>` package
+describes all the details of the format.
+
+Examples
+~~~~~~~~
+
+Get an instance's IP Address
+............................
+
+For the most part, you can pick out any field from the JSON in a
+fairly straightforward manner.
+
+.. code-block:: bash
+
+    docker inspect -format='{{.NetworkSettings.IPAddress}}' $INSTANCE_ID
+
+List All Port Bindings
+......................
+
+One can loop over arrays and maps in the results to produce simple
+text output:
+
+.. code-block:: bash
+
+    docker inspect -format='{{range $p, $conf := .NetworkSettings.Ports}} {{$p}} -> {{(index $conf 0).HostPort}} {{end}}' $INSTANCE_ID
+
+Find a Specific Port Mapping
+............................
+
+.. code-block:: bash
+
+The ``.Field`` syntax doesn't work when the field name begins with a
+number, but the template language's ``index`` function does.  The
+``.NetworkSettings.Ports`` section contains a map of the internal port
+mappings to a list of external address/port objects, so to grab just
+the numeric public port, you use ``index`` to find the specific port
+map, and then ``index`` 0 contains first object inside of that.  Then
+we ask for the ``HostPort`` field to get the public address.
+
+.. code-block:: bash
+
+    docker inspect -format='{{(index (index .NetworkSettings.Ports "8787/tcp") 0).HostPort}}' $INSTANCE_ID
 
 .. _cli_kill:
 

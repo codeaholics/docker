@@ -23,7 +23,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -32,6 +31,7 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"text/template"
 	"time"
 )
 
@@ -206,7 +206,7 @@ func (cli *DockerCli) CmdBuild(args ...string) error {
 	// FIXME: ProgressReader shouldn't be this annoying to use
 	if context != nil {
 		sf := utils.NewStreamFormatter(false)
-		body = utils.ProgressReader(ioutil.NopCloser(context), 0, cli.err, sf.FormatProgress("", "Uploading context", "%v bytes%0.0s%0.0s"), sf, true)
+		body = utils.ProgressReader(ioutil.NopCloser(context), 0, cli.err, sf, true, "", "Uploading context")
 	}
 	// Upload the build context
 	v := &url.Values{}
@@ -229,6 +229,8 @@ func (cli *DockerCli) CmdBuild(args ...string) error {
 	if context != nil {
 		headers.Set("Content-Type", "application/tar")
 	}
+	// Temporary hack to fix displayJSON behavior
+	cli.isTerminal = false
 	err = cli.stream("POST", fmt.Sprintf("/build?%s", v.Encode()), body, cli.out, headers)
 	if jerr, ok := err.(*utils.JSONError); ok {
 		return &utils.StatusError{Status: jerr.Message, StatusCode: jerr.Code}
@@ -633,6 +635,7 @@ func (cli *DockerCli) CmdStart(args ...string) error {
 
 func (cli *DockerCli) CmdInspect(args ...string) error {
 	cmd := cli.Subcmd("inspect", "CONTAINER|IMAGE [CONTAINER|IMAGE...]", "Return low-level information on a container/image")
+	tmplStr := cmd.String("format", "", "Format the output using the given go template.")
 	if err := cmd.Parse(args); err != nil {
 		return nil
 	}
@@ -641,10 +644,21 @@ func (cli *DockerCli) CmdInspect(args ...string) error {
 		return nil
 	}
 
+	var tmpl *template.Template
+	if *tmplStr != "" {
+		var err error
+		if tmpl, err = template.New("").Parse(*tmplStr); err != nil {
+			fmt.Fprintf(cli.err, "Template parsing error: %v\n", err)
+			return &utils.StatusError{StatusCode: 64,
+				Status: "Template parsing error: " + err.Error()}
+		}
+	}
+
 	indented := new(bytes.Buffer)
+	indented.WriteByte('[')
 	status := 0
 
-	for _, name := range args {
+	for _, name := range cmd.Args() {
 		obj, _, err := cli.call("GET", "/containers/"+name+"/json", nil)
 		if err != nil {
 			obj, _, err = cli.call("GET", "/images/"+name+"/json", nil)
@@ -659,23 +673,40 @@ func (cli *DockerCli) CmdInspect(args ...string) error {
 			}
 		}
 
-		if err = json.Indent(indented, obj, "", "    "); err != nil {
-			fmt.Fprintf(cli.err, "%s\n", err)
-			status = 1
-			continue
+		if tmpl == nil {
+			if err = json.Indent(indented, obj, "", "    "); err != nil {
+				fmt.Fprintf(cli.err, "%s\n", err)
+				status = 1
+				continue
+			}
+		} else {
+			// Has template, will render
+			var value interface{}
+			if err := json.Unmarshal(obj, &value); err != nil {
+				fmt.Fprintf(cli.err, "%s\n", err)
+				status = 1
+				continue
+			}
+			if err := tmpl.Execute(cli.out, value); err != nil {
+				return err
+			}
+			cli.out.Write([]byte{'\n'})
 		}
 		indented.WriteString(",")
 	}
 
-	if indented.Len() > 0 {
+	if indented.Len() > 1 {
 		// Remove trailing ','
 		indented.Truncate(indented.Len() - 1)
 	}
-	fmt.Fprintf(cli.out, "[")
-	if _, err := io.Copy(cli.out, indented); err != nil {
-		return err
+	indented.WriteByte(']')
+
+	if tmpl == nil {
+		if _, err := io.Copy(cli.out, indented); err != nil {
+			return err
+		}
 	}
-	fmt.Fprintf(cli.out, "]")
+
 	if status != 0 {
 		return &utils.StatusError{StatusCode: status}
 	}
@@ -741,16 +772,12 @@ func (cli *DockerCli) CmdPort(args ...string) error {
 		return err
 	}
 
-	if frontends, exists := out.NetworkSettings.Ports[Port(port+"/"+proto)]; exists {
-		if frontends == nil {
-			fmt.Fprintf(cli.out, "%s\n", port)
-		} else {
-			for _, frontend := range frontends {
-				fmt.Fprintf(cli.out, "%s:%s\n", frontend.HostIp, frontend.HostPort)
-			}
+	if frontends, exists := out.NetworkSettings.Ports[Port(port+"/"+proto)]; exists && frontends != nil {
+		for _, frontend := range frontends {
+			fmt.Fprintf(cli.out, "%s:%s\n", frontend.HostIp, frontend.HostPort)
 		}
 	} else {
-		return fmt.Errorf("Error: No private port '%s' allocated on %s", cmd.Arg(1), cmd.Arg(0))
+		return fmt.Errorf("Error: No public port '%s' published for %s", cmd.Arg(1), cmd.Arg(0))
 	}
 	return nil
 }
@@ -906,7 +933,7 @@ func (cli *DockerCli) CmdKill(args ...string) error {
 }
 
 func (cli *DockerCli) CmdImport(args ...string) error {
-	cmd := cli.Subcmd("import", "URL|- [REPOSITORY[:TAG]]", "Create a new filesystem image from the contents of a tarball(.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz).")
+	cmd := cli.Subcmd("import", "URL|- [REPOSITORY[:TAG]]", "Create an empty filesystem image and import the contents of the tarball (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz) into it, then optionally tag it.")
 
 	if err := cmd.Parse(args); err != nil {
 		return nil
@@ -1622,58 +1649,6 @@ func (cli *DockerCli) CmdSearch(args ...string) error {
 // Ports type - Used to parse multiple -p flags
 type ports []int
 
-// AttachOpts stores arguments to 'docker run -a', eg. which streams to attach to
-type AttachOpts map[string]bool
-
-func (opts AttachOpts) String() string { return fmt.Sprintf("%v", map[string]bool(opts)) }
-func (opts AttachOpts) Set(val string) error {
-	if val != "stdin" && val != "stdout" && val != "stderr" {
-		return fmt.Errorf("Unsupported stream name: %s", val)
-	}
-	opts[val] = true
-	return nil
-}
-
-// LinkOpts stores arguments to `docker run -link`
-type LinkOpts []string
-
-func (link *LinkOpts) String() string { return fmt.Sprintf("%v", []string(*link)) }
-func (link *LinkOpts) Set(val string) error {
-	if _, err := parseLink(val); err != nil {
-		return err
-	}
-	*link = append(*link, val)
-	return nil
-}
-
-// PathOpts stores a unique set of absolute paths
-type PathOpts map[string]struct{}
-
-func (opts PathOpts) String() string { return fmt.Sprintf("%v", map[string]struct{}(opts)) }
-func (opts PathOpts) Set(val string) error {
-	var containerPath string
-
-	if strings.Count(val, ":") > 2 {
-		return fmt.Errorf("bad format for volumes: %s", val)
-	}
-
-	if splited := strings.SplitN(val, ":", 2); len(splited) == 1 {
-		containerPath = splited[0]
-		val = filepath.Clean(splited[0])
-	} else {
-		containerPath = splited[1]
-		val = fmt.Sprintf("%s:%s", splited[0], filepath.Clean(splited[1]))
-	}
-
-	if !filepath.IsAbs(containerPath) {
-		utils.Debugf("%s is not an absolute path", containerPath)
-		return fmt.Errorf("%s is not an absolute path", containerPath)
-	}
-	opts[val] = struct{}{}
-
-	return nil
-}
-
 func (cli *DockerCli) CmdTag(args ...string) error {
 	cmd := cli.Subcmd("tag", "[OPTIONS] IMAGE REPOSITORY[:TAG]", "Tag an image into a repository")
 	force := cmd.Bool("f", false, "Force")
@@ -1719,16 +1694,16 @@ func ParseRun(args []string, capabilities *Capabilities) (*Config, *HostConfig, 
 func parseRun(cmd *flag.FlagSet, args []string, capabilities *Capabilities) (*Config, *HostConfig, *flag.FlagSet, error) {
 	var (
 		// FIXME: use utils.ListOpts for attach and volumes?
-		flAttach  = AttachOpts{}
-		flVolumes = PathOpts{}
-		flLinks   = LinkOpts{}
+		flAttach  = NewListOpts(ValidateAttach)
+		flVolumes = NewListOpts(ValidatePath)
+		flLinks   = NewListOpts(ValidateLink)
+		flEnv     = NewListOpts(ValidateEnv)
 
-		flPublish     utils.ListOpts
-		flExpose      utils.ListOpts
-		flEnv         utils.ListOpts
-		flDns         utils.ListOpts
-		flVolumesFrom utils.ListOpts
-		flLxcOpts     utils.ListOpts
+		flPublish     ListOpts
+		flExpose      ListOpts
+		flDns         ListOpts
+		flVolumesFrom ListOpts
+		flLxcOpts     ListOpts
 
 		flAutoRemove      = cmd.Bool("rm", false, "Automatically remove the container when it exits (incompatible with -d)")
 		flDetach          = cmd.Bool("d", false, "Detached mode: Run container in the background, print new container id")
@@ -1750,13 +1725,13 @@ func parseRun(cmd *flag.FlagSet, args []string, capabilities *Capabilities) (*Co
 		_ = cmd.String("name", "", "Assign a name to the container")
 	)
 
-	cmd.Var(flAttach, "a", "Attach to stdin, stdout or stderr.")
-	cmd.Var(flVolumes, "v", "Bind mount a volume (e.g. from the host: -v /host:/container, from docker: -v /container)")
+	cmd.Var(&flAttach, "a", "Attach to stdin, stdout or stderr.")
+	cmd.Var(&flVolumes, "v", "Bind mount a volume (e.g. from the host: -v /host:/container, from docker: -v /container)")
 	cmd.Var(&flLinks, "link", "Add link to another container (name:alias)")
+	cmd.Var(&flEnv, "e", "Set environment variables")
 
 	cmd.Var(&flPublish, "p", fmt.Sprintf("Publish a container's port to the host (format: %s) (use 'docker port' to see the actual mapping)", PortSpecTemplateFormat))
 	cmd.Var(&flExpose, "expose", "Expose a port from the container without publishing it to your host")
-	cmd.Var(&flEnv, "e", "Set environment variables")
 	cmd.Var(&flDns, "dns", "Set custom dns servers")
 	cmd.Var(&flVolumesFrom, "volumes-from", "Mount volumes from the specified container(s)")
 	cmd.Var(&flLxcOpts, "lxc-conf", "Add custom lxc options -lxc-conf=\"lxc.cgroup.cpuset.cpus = 0,1\"")
@@ -1771,7 +1746,7 @@ func parseRun(cmd *flag.FlagSet, args []string, capabilities *Capabilities) (*Co
 	}
 
 	// Validate input params
-	if *flDetach && len(flAttach) > 0 {
+	if *flDetach && flAttach.Len() > 0 {
 		return nil, nil, cmd, ErrConflictAttachDetach
 	}
 	if *flWorkingDir != "" && !path.IsAbs(*flWorkingDir) {
@@ -1782,24 +1757,13 @@ func parseRun(cmd *flag.FlagSet, args []string, capabilities *Capabilities) (*Co
 	}
 
 	// If neither -d or -a are set, attach to everything by default
-	if len(flAttach) == 0 && !*flDetach {
+	if flAttach.Len() == 0 && !*flDetach {
 		if !*flDetach {
 			flAttach.Set("stdout")
 			flAttach.Set("stderr")
 			if *flStdin {
 				flAttach.Set("stdin")
 			}
-		}
-	}
-
-	var envs []string
-	for _, env := range flEnv {
-		arr := strings.Split(env, "=")
-		if len(arr) > 1 {
-			envs = append(envs, env)
-		} else {
-			v := os.Getenv(env)
-			envs = append(envs, env+"="+v)
 		}
 	}
 
@@ -1814,16 +1778,15 @@ func parseRun(cmd *flag.FlagSet, args []string, capabilities *Capabilities) (*Co
 
 	var binds []string
 	// add any bind targets to the list of container volumes
-	for bind := range flVolumes {
-		arr := strings.Split(bind, ":")
-		if len(arr) > 1 {
+	for bind := range flVolumes.GetMap() {
+		if arr := strings.Split(bind, ":"); len(arr) > 1 {
 			if arr[0] == "/" {
 				return nil, nil, cmd, fmt.Errorf("Invalid bind mount: source can't be '/'")
 			}
 			dstDir := arr[1]
-			flVolumes[dstDir] = struct{}{}
+			flVolumes.Set(dstDir)
 			binds = append(binds, bind)
-			delete(flVolumes, bind)
+			flVolumes.Delete(bind)
 		}
 	}
 
@@ -1858,13 +1821,13 @@ func parseRun(cmd *flag.FlagSet, args []string, capabilities *Capabilities) (*Co
 		domainname = parts[1]
 	}
 
-	ports, portBindings, err := parsePortSpecs(flPublish)
+	ports, portBindings, err := parsePortSpecs(flPublish.GetAll())
 	if err != nil {
 		return nil, nil, cmd, err
 	}
 
 	// Merge in exposed ports to the map of published ports
-	for _, e := range flExpose {
+	for _, e := range flExpose.GetAll() {
 		if strings.Contains(e, ":") {
 			return nil, nil, cmd, fmt.Errorf("Invalid port format for -expose: %s", e)
 		}
@@ -1885,15 +1848,15 @@ func parseRun(cmd *flag.FlagSet, args []string, capabilities *Capabilities) (*Co
 		OpenStdin:       *flStdin,
 		Memory:          flMemory,
 		CpuShares:       *flCpuShares,
-		AttachStdin:     flAttach["stdin"],
-		AttachStdout:    flAttach["stdout"],
-		AttachStderr:    flAttach["stderr"],
-		Env:             envs,
+		AttachStdin:     flAttach.Get("stdin"),
+		AttachStdout:    flAttach.Get("stdout"),
+		AttachStderr:    flAttach.Get("stderr"),
+		Env:             flEnv.GetAll(),
 		Cmd:             runCmd,
-		Dns:             flDns,
+		Dns:             flDns.GetAll(),
 		Image:           image,
-		Volumes:         flVolumes,
-		VolumesFrom:     strings.Join(flVolumesFrom, ","),
+		Volumes:         flVolumes.GetMap(),
+		VolumesFrom:     strings.Join(flVolumesFrom.GetAll(), ","),
 		Entrypoint:      entrypoint,
 		WorkingDir:      *flWorkingDir,
 	}
@@ -1904,7 +1867,7 @@ func parseRun(cmd *flag.FlagSet, args []string, capabilities *Capabilities) (*Co
 		LxcConf:         lxcConf,
 		Privileged:      *flPrivileged,
 		PortBindings:    portBindings,
-		Links:           flLinks,
+		Links:           flLinks.GetAll(),
 		PublishAllPorts: *flPublishAll,
 	}
 
